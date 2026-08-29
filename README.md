@@ -8,6 +8,8 @@ TLS protects a request while it is travelling between TLS endpoints. It does not
 
 The useful question is therefore not *where can a secret be made impossible to leak?* but *which carrier minimizes the likely exposure for a particular threat model, and what additional controls reduce the remaining risk?*
 
+For the short version, go directly to the [list of request carriers and their leakage pitfalls](#summary-table).
+
 This document compares the accidental-disclosure properties of common places in which browser applications put sensitive values. It concentrates on accidental persistence and disclosure, not on an attacker who has fully compromised the origin or browser. If malicious JavaScript can act with the same authority as the application, it can usually read data available to the application or cause the application to use credentials on its behalf.
 
 The central rule is simple:
@@ -37,17 +39,17 @@ This document is intended to fill that narrower implementation gap. It does not 
 
 The ratings below describe common browser and infrastructure behaviour, not a protocol guarantee. A deployment can make any row worse through configuration. A linked sword, [⚔](#authorization), leads to further discussion.
 
-| Carrier | Browser persistence or history | Ordinary access logs | Error, debug, and trace capture | Same-origin JavaScript | Appropriate use |
-| --- | --- | --- | --- | --- | --- |
-| `Authorization: Bearer …` [⚔](#authorization) | Low for application-supplied bearer tokens; browser-managed HTTP authentication may be retained separately | Usually low because many systems recognize it as sensitive | Medium: redaction is common but not universal | High when the application owns the token | Short-lived, scoped API credentials |
-| `Cookie` with `Secure; HttpOnly; SameSite` [⚔](#cookies) | High by design: the browser stores it | Usually low, but highly configuration-dependent | Medium: full request dumps may include it | Low for directly reading an `HttpOnly` value; high for causing authenticated requests | Opaque browser session identifiers |
-| `Proxy-Authorization` | Low | Usually low at the origin; visible to the authenticating proxy | Medium | Usually low | Proxy authentication only; never repurpose it |
-| Custom secret header such as `X-API-Key` [⚔](#custom-secret-headers) | Low unless application code persists the value | Usually low in traditional access-log formats | Medium–high because generic redactors may not recognize it | High | Machine or API credentials when `Authorization` cannot be used |
-| Request body [⚔](#request-bodies) | Usually low in browser history and HTTP caches | Usually low in traditional access logs | High in practice, especially on errors | High | Necessary PII or structured sensitive input, with minimization and redaction |
-| URL fragment [⚔](#url-fragments) | High until removed; may enter history and history sync | Low, but not zero in operational reality | Medium in browser telemetry and page-level error reports | Very high | Narrow client-side bootstrap and split-knowledge designs |
-| URL path or query string [⚔](#url-paths-and-query-strings) | Very high | Very high | Very high | Very high | Non-sensitive routing and filtering values only |
-| `Referer`, `User-Agent`, `Forwarded`, or `X-Forwarded-For` | Medium | Very high | High | Varies | Protocol metadata only; never repurpose for secrets |
-| Tracing `baggage` or similar context [⚔](#tracing-and-baggage) | Usually low | High across downstream telemetry | Very high by design | High when created in the browser | Non-sensitive correlation metadata only |
+| Carrier | Browser persistence or history | Browser Performance Timeline | Ordinary access logs | Error, debug, and trace capture | Same-origin JavaScript | Appropriate use |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Authorization: Bearer …` [⚔](#authorization) | Low for application-supplied bearer tokens; browser-managed HTTP authentication may be retained separately | Low: the API exposes URLs, not header values | Usually low because many systems recognize it as sensitive | Medium: redaction is common but not universal | High when the application owns the token | Short-lived, scoped API credentials |
+| `Cookie` with `Secure; HttpOnly; SameSite` [⚔](#cookies) | High by design: the browser stores it | Low: the API does not expose cookie values | Usually low, but highly configuration-dependent | Medium: full request dumps may include it | Low for directly reading an `HttpOnly` value; high for causing authenticated requests | Opaque browser session identifiers |
+| `Proxy-Authorization` | Low | Low: the API does not expose the header value | Usually low at the origin; visible to the authenticating proxy | Medium | Usually low | Proxy authentication only; never repurpose it |
+| Custom secret header such as `X-API-Key` [⚔](#custom-secret-headers) | Low unless application code persists the value | Low: the API exposes URLs, not header values | Usually low in traditional access-log formats | Medium–high because generic redactors may not recognize it | High | Machine or API credentials when `Authorization` cannot be used |
+| Request body [⚔](#request-bodies) | Usually low in browser history and HTTP caches | Low: the API does not expose the body | Usually low in traditional access logs | High in practice, especially on errors | High | Necessary PII or structured sensitive input, with minimization and redaction |
+| URL fragment [⚔](#url-fragments) | High until removed; may enter history and history sync | High when retained in a navigation or resource entry; browser-dependent | Low, but not zero in operational reality | Medium in browser telemetry and page-level error reports | Very high | Narrow, isolated bootstrap and split-knowledge designs only |
+| URL path or query string [⚔](#url-paths-and-query-strings) | Very high | Very high: navigation and resource entries expose request URLs | Very high | Very high | Very high | Non-sensitive routing and filtering values only |
+| `Referer`, `User-Agent`, `Forwarded`, or `X-Forwarded-For` | Medium | Low: these request headers are not exposed | Very high | High | Varies | Protocol metadata only; never repurpose for secrets |
+| Tracing `baggage` or similar context [⚔](#tracing-and-baggage) | Usually low | Low unless copied into a URL | High across downstream telemetry | Very high by design | High when created in the browser | Non-sensitive correlation metadata only |
 
 “Low” does not mean “safe.” It means that the value is less likely to appear in that particular sink under conventional defaults.
 
@@ -159,6 +161,27 @@ When a fragment is used for a narrowly scoped bootstrap value, it should be remo
 
 This script should be the first executable content on an isolated landing page. The page should avoid third-party scripts, use a strict Content Security Policy, avoid redirects before cleanup, and keep the value only as long as needed. Cleanup reduces exposure but cannot undo capture that occurred before `replaceState` executed.
 
+### Performance Timeline retains request URLs
+
+Removing a fragment from `window.location` and browser history does not necessarily remove it from the browser's Performance Timeline. [Navigation Timing](https://w3c.github.io/navigation-timing/#marking-navigation-timing) initializes the navigation entry from the document's URL, and [Resource Timing](https://w3c.github.io/resource-timing/#sec-performanceresourcetiming) stores requested resource URLs in performance entries. The [HTML history update steps](https://html.spec.whatwg.org/dev/browsing-the-web.html#url-and-history-update-steps) used by `history.replaceState` change the document and session-history URL but do not rewrite an already-created performance entry.
+
+Same-origin code that runs later may therefore be able to recover an initial navigation URL or the URLs of earlier Fetch, XHR, image, script, and other resource requests:
+
+```js
+const initialURL = performance.getEntriesByType("navigation")[0]?.name;
+const resourceURLs = performance
+  .getEntriesByType("resource")
+  .map(entry => entry.name);
+```
+
+The Performance APIs expose URLs and timing metadata rather than request headers or bodies. They do not directly reveal an `Authorization` value, cookie, or body field unless application code also placed that value in a URL. Browser handling of fragments varies, particularly for special fragment directives, so an application should conservatively assume that an ordinary fragment can remain available through a navigation or resource entry after visible cleanup.
+
+`performance.clearResourceTimings()` can remove buffered resource entries, but there is no corresponding standard operation for clearing the current navigation entry. Clearing also cannot retract a value already copied by a `PerformanceObserver`, analytics library, logging or tracing client, browser extension, or earlier script.
+
+If later page code must not be able to recover the bootstrap URL, the bootstrap should run in a minimal isolated document and then transition to a genuinely new document whose initial URL never contained the fragment. Merely removing or replacing the fragment in the same document is not sufficient. The new document should be loaded before third-party, analytics, logging, tracing, or other nonessential code is introduced.
+
+Given these complications, a fragment is not a leak-proof place to store raw PII, reusable credentials, or secret tokens when logging, tracing, analytics, or malicious code can run with first-party authority. At most, it should carry a narrowly scoped, short-lived, single-use bootstrap value or decryption key whose disclosure has been explicitly considered in the threat model.
+
 ### Fragment-held decryption keys
 
 A specialised split-knowledge design can place ciphertext in a server-visible location and its decryption key in the fragment. The server, CDN, and conventional request logs then see ciphertext while the page can decrypt it locally.
@@ -170,6 +193,7 @@ A framework implementing this pattern should provide:
 - expiry and replay protection;
 - immediate fragment removal;
 - an isolated bootstrap document with no third-party code;
+- a transition to a new clean document before loading less-trusted application or telemetry code, when the original navigation URL must no longer be observable;
 - explicit binding of the ciphertext to its intended origin and purpose;
 - zero plaintext logging after decryption.
 
@@ -345,7 +369,7 @@ For a new browser application, the general order of preference is:
 3. Keep API tokens in a BFF and give the browser an opaque `Secure; HttpOnly; SameSite` session cookie.
 4. When the browser must call an API directly, use a short-lived, scoped `Authorization` credential held in memory.
 5. Put necessary PII in a minimized request body, with schema-derived redaction and, where justified, application-layer field encryption.
-6. Use fragments only for deliberately designed client-side bootstrap or split-knowledge protocols, and remove them immediately.
+6. Use fragments only for deliberately designed, isolated client-side bootstrap or split-knowledge protocols; remove them immediately, account for Performance Timeline retention, and prefer a new clean document before loading other code.
 7. Never put credentials or raw PII in paths, query strings, referrers, tracing baggage, metric labels, or cache keys.
 8. Never transmit a private cryptographic key merely to authenticate a request; use a proof of possession instead.
 
@@ -377,6 +401,10 @@ The strongest architectures reduce how often the browser receives reusable secre
 - [RFC 9180: Hybrid Public Key Encryption](https://www.rfc-editor.org/rfc/rfc9180.html)
 - [RFC 9449: OAuth 2.0 Demonstrating Proof of Possession](https://www.rfc-editor.org/rfc/rfc9449.html)
 - [W3C Referrer Policy](https://www.w3.org/TR/referrer-policy/)
+- [W3C Navigation Timing](https://w3c.github.io/navigation-timing/)
+- [W3C Resource Timing](https://w3c.github.io/resource-timing/)
+- [W3C Performance Timeline](https://w3c.github.io/performance-timeline/)
+- [WHATWG HTML history](https://html.spec.whatwg.org/dev/browsing-the-web.html#history)
 - [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)
 - [OpenTelemetry HTTP semantic conventions](https://opentelemetry.io/docs/specs/semconv/registry/attributes/http/)
 - [OpenTelemetry baggage security considerations](https://opentelemetry.io/docs/concepts/signals/baggage/#baggage-security-considerations)
