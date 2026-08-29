@@ -2,7 +2,7 @@
   <img src="assets/secretseal-logo.png" alt="A cartoon seal protectively holding a sealed envelope" width="240">
 </p>
 
-# SecretSeal
+# Secret Seal: How can I prevent secrets from leaking from an HTTP request?
 
 ## Leak-resistant browser requests
 
