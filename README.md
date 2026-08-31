@@ -4,6 +4,12 @@
 
 # Secret Seal: How can I prevent secrets from leaking from an HTTP request?
 
+<p align="center">
+  <a href="https://github.com/jasvir/secretseal"><img src="assets/github-link.svg" alt="SecretSeal GitHub repository" height="24"></a>
+  <a href="https://twitter.com/jasvir"><img src="assets/twitter-link.svg" alt="Follow @jasvir on Twitter" height="24"></a>
+  <a href="https://www.linkedin.com/in/jasvirnagra/"><img src="assets/linkedin-link.svg" alt="Jasvir Nagra on LinkedIn" height="24"></a>
+</p>
+
 ## Leak-resistant browser requests
 
 Browser applications routinely send authentication tokens, personally identifiable information (PII), and other sensitive values through infrastructure that was built for observability and performance rather than secrecy. A request may pass through browser history, an HTTP cache, a service worker, a browser extension, a CDN, a load balancer, a reverse proxy, an application framework, tracing instrumentation, exception reporting, and several log stores before it reaches its final handler.

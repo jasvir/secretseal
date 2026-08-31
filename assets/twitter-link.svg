@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="93" height="24" role="img" aria-label="Twitter @jasvir">
+  <title>Twitter @jasvir</title>
+  <rect width="93" height="24" rx="6" fill="#000"/>
+  <g transform="translate(5 4)" fill="#fff">
+    <path d="M12.6.75h2.454l-5.36 6.126L16 15.25h-4.937L7.197 10.19 2.771 15.25H.316l5.733-6.554L0 .75h5.063l3.495 4.624L12.601.75Zm-.86 13.025h1.36L4.323 2.145H2.865z"/>
+  </g>
+  <text x="27" y="16" fill="#fff" font-family="Arial, Helvetica, sans-serif" font-size="11">@jasvir</text>
+</svg>
