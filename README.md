@@ -226,6 +226,69 @@ Distributed tracing is designed to propagate context across process boundaries. 
 
 OpenTelemetry baggage may be forwarded automatically to downstream services and then copied into spans, metrics, and logs. Its own [security guidance](https://opentelemetry.io/docs/concepts/signals/baggage/#baggage-security-considerations) warns that sensitive baggage can reach unintended resources, including third-party APIs. Credentials, raw user identifiers, email addresses, health information, and other PII should not be placed in `baggage`, `tracestate`, correlation headers, or metric labels.
 
+## Nonces, single-use tokens, and opaque handles
+
+Nonces and single-use handles reduce the value of a leak; they do not necessarily prevent the leak or protect the underlying data when it is finally collected or used.
+
+A nonce, a one-time token, and a sender-bound credential solve related but different problems:
+
+- A **nonce** establishes freshness when it is bound to an authenticated request or proof. It does not provide authentication or confidentiality by itself, and it need not always be literally single-use. For example, DPoP can permit a server nonce to be reused while rejecting duplicate proof identifiers.
+- A **single-use opaque handle** refers to server-side state or authorizes one narrowly defined operation without carrying the PII or secret in its own value. Before redemption, an unbound handle is still a bearer credential: someone who obtains it may be able to win a race to use it.
+- A **sender-bound token** requires proof from a particular user, client, browser-held key, or other presenter. This makes an exported token less useful, but malicious code running in the authorized browser may still invoke the key or ask the browser to make the request. [RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html#section-11.4) describes this limitation for DPoP.
+- **Encryption** can prevent early intermediaries from seeing a value, but the browser that collects it and the service that decrypts it still receive plaintext.
+- A **zero-knowledge proof** can prove a limited fact without revealing the underlying value, but only when the application needs the fact rather than the data itself.
+
+### A practical redemption model
+
+A one-time handle should be high-entropy, opaque, short-lived, and bound to one declared purpose. A typical lifecycle is:
+
+1. Create the handle without embedding PII, credentials, account numbers, or business meaning.
+2. Bind it to the expected subject or session, action, audience, expiry, and, where appropriate, a browser-held public key.
+3. Bind any proof to the intended request method and destination. For high-value operations, also bind the submitted content so that a stolen proof cannot authorize a different payload. [HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421.html) and a content digest provide standard building blocks for such protocols.
+4. Redeem it atomically and permit one logical operation.
+5. Return or perform only the minimum operation authorized by the handle.
+6. Retain only a non-reversible audit fingerprint and the minimum state needed to make retries safe.
+7. Treat an attempted reuse as a possible leak or replay signal.
+
+“Single-use” should usually mean one logical operation rather than one HTTP delivery attempt. A browser, proxy, or application may retry after a timeout, and the original response may have been lost. An identical retry should be able to recover the original outcome without repeating the side effect; a changed payload or action should fail. This requires coordinated state across replicas and careful handling of concurrent redemption, partial failure, expiry, back-button navigation, and multiple tabs.
+
+Do not store redeemable handles in plaintext if a hash is sufficient for lookup or verification. Do not put them in a URL merely because they are opaque: until expiry or successful redemption, they may still be credentials and can still be copied into history, logs, referrers, telemetry, and support tools.
+
+### Binding trade-offs
+
+- **User or authenticated session binding** is usually the least surprising default. It prevents a different account from redeeming a leaked handle, but it does not help when the session is also compromised.
+- **Browser or device key binding** provides stronger resistance to off-device replay. DPoP can use a non-extractable browser key for this purpose, but injected code can still invoke that key while it controls the browser. Device reset, lost browser storage, cross-device continuation, accessibility tools, and account recovery also need explicit handling.
+- **IP address binding** may reduce reuse from a visibly different network, but it is brittle as a hard control. Mobile networks, VPNs, IPv6 address changes, corporate proxies, and carrier-grade NAT can change an honest user's address or give many users the same address. An attacker may also share the victim's apparent address. [OWASP's session guidance](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html#binding-the-session-id-to-other-user-properties) treats IP address and User-Agent properties as useful detection signals rather than complete defences. If an IP signal is used, it must come from a trusted network boundary rather than an untrusted forwarding header.
+- **Purpose, action, audience, method, and destination binding** is strong and comparatively low-friction. A handle issued to submit one form should not be usable to retrieve the record, call another service, or authorize a different operation.
+- **Delegation** should be explicit. Rather than forwarding the original user- or browser-bound token, exchange it for a shorter-lived, more narrowly scoped token bound to the delegate. [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693.html) defines OAuth token-exchange patterns for delegation and impersonation. Hard binding without an exchange mechanism makes legitimate delegation difficult or impossible.
+
+### When the browser gathers the PII
+
+A handle cannot replace PII that the server has never received. When the person enters the data in a browser, the initial collection still needs a deliberately narrow ingestion path:
+
+1. The server issues a one-time submission handle bound to the intended form, user or session, schema, and action.
+2. The browser gathers the minimum PII required for that action.
+3. The browser sends it in the request body to a dedicated ingestion service, using the handle to authorize and correlate the submission.
+4. Where justified, the browser encrypts selected fields directly for that service so that CDNs, TLS terminators, gateways, and early logging see ciphertext rather than plaintext.
+5. The ingestion service validates and stores the PII, consumes the submission handle, and returns a new opaque record handle.
+6. Later systems pass the record handle instead of repeatedly copying the PII.
+
+The submission handle controls who may submit, what operation is permitted, and whether it can be replayed. It does not hide data already present in form controls or JavaScript memory. First-party code, third-party code running with first-party authority, browser extensions, and a compromised page may observe the PII before encryption. WebCrypto does not change that boundary: its [security considerations](https://www.w3.org/TR/WebCryptoAPI/#security-considerations-for-authors) warn that injected script can expose keys or data and that the application has access to the messages it processes.
+
+Particularly sensitive collection should therefore use a minimal, isolated page without third-party analytics, session replay, advertising, tag managers, or other nonessential code. A strict content security policy and application-layer field encryption provide defence in depth, but neither makes plaintext safe from malicious code already executing with the collection page's authority.
+
+### The eventual point of exposure
+
+Sooner or later, collected PII must usually be evaluated, displayed, delivered, or used; otherwise there was little reason to collect it. Tokenization does not remove this *revelation boundary*. It reduces how many systems cross it.
+
+The handle resolver should return only the fields or derived result needed for the current purpose. Many callers need an answer such as “age requirement satisfied,” “account verified,” or “delivery permitted,” not the complete underlying record. This is useful data minimization even when a zero-knowledge proof is unnecessary or impractical. Zero-knowledge techniques help only when the verifier can complete its task from a proof of a fact and does not need the source data for delivery, treatment, investigation, support, or another legitimate purpose.
+
+Cryptographic private keys are a special case: they often need to be used but do not need to be revealed. An HSM, KMS, or narrowly scoped signing or decryption service can perform the operation while keeping the key bytes inside the protected boundary.
+
+The resulting architecture has fewer plaintext leak points, but the remaining points become more important. The ingestion service, handle resolver, PII store, authorized consumers, and key-use service are concentrated trust boundaries. They require strict access control, purpose limitation, safe request representations, schema-derived redaction, short retention, and leak-canary testing. An opaque handle can also remain personal data when it is linkable to a person, even if its value contains no recognizable PII.
+
+The practical advantages are smaller and less informative leaked values, expiry and replay detection, centralized authorization, easier revocation, and fewer systems receiving plaintext. The costs are server-side state, an additional resolution dependency, atomic redemption and retry complexity, recovery and cross-device friction, harder delegation, and a high-value resolver or vault. These mechanisms contain authority and concentrate plaintext; they do not make either disappear.
+
 ## Framework facilities that can provide stronger protection
 
 Choosing a carrier is a local decision. Preventing leaks is an end-to-end property. A framework can provide protections that are difficult for each application team to implement consistently.
@@ -300,16 +363,7 @@ The framework can reject contradictory `public` or `s-maxage` directives, reject
 
 ### 5. One-time opaque handles
 
-The safest URL value is often a random handle with no meaning outside a short redemption window. A framework can make handle exchange a primitive:
-
-1. Generate a high-entropy, purpose-bound, expiring handle.
-2. Bind it to the expected origin, client, and action.
-3. Permit exactly one successful redemption.
-4. Exchange it for server-side state or an `HttpOnly` session cookie.
-5. Redirect to a clean URL.
-6. Retain only a non-reversible audit fingerprint.
-
-This pattern is easy to describe but difficult to implement correctly under retries, concurrent tabs, back-button navigation, clock skew, partial failure, and replay. Those are good reasons to centralize it.
+The safest URL value is often a random handle with no meaning outside a short redemption window. A framework can make the [nonce and single-use-token lifecycle](#nonces-single-use-tokens-and-opaque-handles) a primitive: generate and bind the handle, enforce one logical operation with retry-safe redemption, exchange it for server-side state or an `HttpOnly` session cookie, redirect to a clean URL, and retain only a non-reversible audit fingerprint. Centralizing this lifecycle keeps concurrency, partial failure, recovery, and replay policy out of individual handlers.
 
 ### 6. Application-layer encrypted fields
 
@@ -399,11 +453,14 @@ The strongest architectures reduce how often the browser receives reusable secre
 - [RFC 9111: HTTP Caching](https://www.rfc-editor.org/rfc/rfc9111.html)
 - [RFC 6265: HTTP State Management Mechanism](https://www.rfc-editor.org/rfc/rfc6265.html)
 - [RFC 6750: OAuth 2.0 Bearer Token Usage](https://www.rfc-editor.org/rfc/rfc6750.html)
+- [RFC 8693: OAuth 2.0 Token Exchange](https://www.rfc-editor.org/rfc/rfc8693.html)
 - [RFC 9700: Best Current Practice for OAuth 2.0 Security](https://www.rfc-editor.org/rfc/rfc9700.html)
 - [RFC 10017: OAuth 2.0 for Browser-Based Applications](https://www.rfc-editor.org/rfc/rfc10017.html)
 - [RFC 7541: HPACK](https://www.rfc-editor.org/rfc/rfc7541.html)
 - [RFC 9180: Hybrid Public Key Encryption](https://www.rfc-editor.org/rfc/rfc9180.html)
+- [RFC 9421: HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421.html)
 - [RFC 9449: OAuth 2.0 Demonstrating Proof of Possession](https://www.rfc-editor.org/rfc/rfc9449.html)
+- [W3C Web Cryptography API](https://www.w3.org/TR/WebCryptoAPI/)
 - [W3C Referrer Policy](https://www.w3.org/TR/referrer-policy/)
 - [W3C Navigation Timing](https://w3c.github.io/navigation-timing/)
 - [W3C Resource Timing](https://w3c.github.io/resource-timing/)
