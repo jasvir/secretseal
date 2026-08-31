@@ -22,6 +22,10 @@ The central rule is simple:
 
 Nevertheless, some carriers are considerably less accident-prone than others.
 
+The figure below separates two independent goals: reducing the number of places that can copy a value and reducing the harm that a copied value can cause. A design can move sensitive values left, down, or both.
+
+![Quadrant diagram comparing how widely HTTP request values may be copied with how harmful a copied value would be](assets/potential-exposure-quadrants.png)
+
 ## Relationship to the OWASP Top 10
 
 The [OWASP Top 10:2025](https://owasp.org/Top10/2025/0x00_2025-Introduction/) recognizes sensitive-data and credential exposure across several root-cause categories rather than as a single vulnerability:
