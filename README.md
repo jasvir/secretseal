@@ -12,29 +12,25 @@
 
 ## Leak-resistant browser requests
 
-Browser applications routinely send authentication tokens, personally identifiable information (PII), and other sensitive values through infrastructure that was built for observability and performance rather than secrecy. A request may pass through browser history, an HTTP cache, a service worker, a browser extension, a CDN, a load balancer, a reverse proxy, an application framework, tracing instrumentation, exception reporting, and several log stores before it reaches its final handler.
+Browser requests leave more copies behind than most of us realise. A request can pass through browser history, a cache, a service worker, an extension, a CDN, a load balancer, a reverse proxy, a framework, tracing, exception reporting and several log stores before the handler does anything useful with it.
 
-TLS protects a request while it is travelling between TLS endpoints. It does not stop those endpoints—or software running behind them—from storing, copying, indexing, or logging the request. In practice, no part of an HTTP request can be completely relied upon to prevent a leak. URLs are copied into histories and access logs; recognized credential headers can still appear in request dumps; unfamiliar headers may escape redaction; cookies are deliberately persisted; fragments are exposed to page code and occasionally reach servers; and request bodies are frequently captured by error and diagnostic tooling.
+TLS is essential, but it protects the request only while it travels between TLS endpoints. Once an endpoint decodes it, the request can be copied, indexed or logged like any other data. URLs turn up in histories and access logs. Credential headers turn up in request dumps. Custom headers evade redaction. Cookies are stored on purpose. Fragments are visible to page code. Bodies are often captured when something goes wrong.
 
-The useful question is therefore not *where can a secret be made impossible to leak?* but *which carrier minimizes the likely exposure for a particular threat model, and what additional controls reduce the remaining risk?*
+So the useful question is not *where can I put a secret so that it cannot leak?* It is *which part of the request is least likely to leak for this threat model, and what else do I need to do?*
 
 For the short version, go directly to the [list of request carriers and their leakage pitfalls](#summary-table).
 
-This document compares the accidental-disclosure properties of common places in which browser applications put sensitive values. It concentrates on accidental persistence and disclosure, not on an attacker who has fully compromised the origin or browser. If malicious JavaScript can act with the same authority as the application, it can usually read data available to the application or cause the application to use credentials on its behalf.
+This guide is about accidental persistence and disclosure. A fully compromised browser or origin is a different problem: malicious code running with the application's authority can usually read the same data or make the application use its credentials.
 
-The central rule is simple:
+> Treat every part of an HTTP request as potentially observable. Some parts are still much less accident-prone than others.
 
-> No part of an HTTP request should be considered intrinsically safe for raw PII, long-lived credentials, or private cryptographic keys.
-
-Nevertheless, some carriers are considerably less accident-prone than others.
-
-The figure below separates two independent goals: reducing the number of places that can copy a value and reducing the harm that a copied value can cause. A design can move sensitive values left, down, or both.
+There are two useful ways to improve a design: reduce the number of places that can copy a value, and reduce what a copied value is worth. The figure shows both.
 
 ![Quadrant diagram comparing how widely HTTP request values may be copied with how harmful a copied value would be](assets/potential-exposure-quadrants.png)
 
 ## Relationship to the OWASP Top 10
 
-The [OWASP Top 10:2025](https://owasp.org/Top10/2025/0x00_2025-Introduction/) recognizes sensitive-data and credential exposure across several root-cause categories rather than as a single vulnerability:
+The [OWASP Top 10:2025](https://owasp.org/Top10/2025/0x00_2025-Introduction/) covers this problem, but in pieces:
 
 - [A02: Security Misconfiguration](https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/) includes insecure cookie configuration and excessive error detail.
 - [A04: Cryptographic Failures](https://owasp.org/Top10/2025/A04_2025-Cryptographic_Failures/) covers missing or inadequate encryption, leaking cryptographic keys, and determining when sensitive data requires application-layer protection in addition to TLS.
@@ -43,15 +39,15 @@ The [OWASP Top 10:2025](https://owasp.org/Top10/2025/0x00_2025-Introduction/) re
 - [A09: Security Logging and Alerting Failures](https://owasp.org/Top10/2025/A09_2025-Security_Logging_and_Alerting_Failures/) explicitly includes placing sensitive information such as PII or protected health information in logs.
 - [A10: Mishandling of Exceptional Conditions](https://owasp.org/Top10/2025/A10_2025-Mishandling_of_Exceptional_Conditions/) includes sensitive information in error messages and debugging output.
 
-Earlier editions described the outcome more directly as [A3:2017 Sensitive Data Exposure](https://owasp.org/www-project-top-ten/2017/A3_2017-Sensitive_Data_Exposure). The newer organization favors underlying causes. That is useful for classifying vulnerabilities, but it makes the complete request-leakage problem less visible in any one entry.
+Earlier editions named the outcome more directly: [A3:2017 Sensitive Data Exposure](https://owasp.org/www-project-top-ten/2017/A3_2017-Sensitive_Data_Exposure). The newer structure is organised around causes. That makes sense for classification, but it is less helpful when the immediate question is whether a value belongs in a header, cookie, body, fragment or URL.
 
-The Top 10 is an awareness and risk-classification document, not a detailed comparison of HTTP request carriers. Supporting OWASP guidance correctly advises that [credentials should not appear in URLs](https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html#sensitive-information-in-http-requests), that [sensitive values should usually be excluded from logs](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html#data-to-exclude), and that [session identifiers should be opaque](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html#session-id-content-or-value). It does not provide a consolidated comparison of how URLs, standard and custom headers, cookies, fragments, bodies, tracing context, errors, caches, and observability systems create and retain copies of the same value.
+The supporting cheat sheets give sound advice: [keep credentials out of URLs](https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html#sensitive-information-in-http-requests), [exclude sensitive values from logs](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html#data-to-exclude), and [make session identifiers opaque](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html#session-id-content-or-value). What they do not give us is one comparison of all the places a request value can be copied: URLs, standard and custom headers, cookies, fragments, bodies, caches, errors, tracing and observability systems.
 
-This document is intended to fill that narrower implementation gap. It does not replace the OWASP guidance: it applies that guidance to the concrete question of where browser-request data accumulates, why some carriers are less accident-prone than others, and which additional controls are needed when sensitive transmission cannot be avoided.
+That narrower comparison is what this guide is for. It complements the OWASP material rather than replacing it.
 
 ## Summary table
 
-The ratings below describe common browser and infrastructure behaviour, not a protocol guarantee. A deployment can make any row worse through configuration. A linked seal, [🦭](#authorization), leads to further discussion.
+These ratings describe common defaults, not protocol guarantees. Configuration can make any row worse. A linked seal, [🦭](#authorization), takes you to the longer discussion.
 
 | Carrier | Browser persistence or history | Browser Performance Timeline | Ordinary access logs | Error, debug, and trace capture | Same-origin JavaScript | Potential Exposure | Appropriate use |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -67,9 +63,9 @@ The ratings below describe common browser and infrastructure behaviour, not a pr
 
 “Low” does not mean “safe.” It means that the value is less likely to appear in that particular sink under conventional defaults.
 
-## Why HTTP caching is only part of the problem
+## Why caching is only part of the problem
 
-[RFC 9111](https://www.rfc-editor.org/rfc/rfc9111.html) defines an HTTP cache key as, at minimum, the request method and target URI. Many caches only cache `GET` responses and primarily use the URI as the key. Request header fields can become part of cache matching when a response names them in `Vary`.
+[RFC 9111](https://www.rfc-editor.org/rfc/rfc9111.html) defines an HTTP cache key as, at minimum, the request method and target URI. In practice, most caches focus on `GET` responses and use the URI as the main key. A response can add request headers to cache matching through `Vary`.
 
 Sensitive headers should therefore never be named in `Vary`:
 
@@ -77,7 +73,7 @@ Sensitive headers should therefore never be named in `Vary`:
 Vary: X-API-Key  # unsafe design
 ```
 
-A cache processing that response must retain enough information to distinguish the original header values. `Authorization` does not need to appear in `Vary`; authenticated requests have special shared-cache rules.
+The cache now has to retain enough information to distinguish the original header values. `Authorization` does not need to appear in `Vary`; authenticated requests already have special shared-cache rules.
 
 For a sensitive exchange, both requests and responses can use:
 
@@ -94,46 +90,46 @@ await fetch(url, {
 });
 ```
 
-`no-store` instructs compliant private and shared caches not to store the immediate request or response. RFC 9111 explicitly warns that it is not a sufficient privacy mechanism. It does not govern application logs, access logs, exception reports, traces, packet capture, browser extensions, or a compromised intermediary. `private` is weaker: it permits storage in a private browser cache while prohibiting shared-cache storage.
+`no-store` tells compliant private and shared caches not to store this request or response. RFC 9111 explicitly warns that it is not a privacy mechanism. It says nothing about application logs, exception reports, traces, packet capture, extensions or a compromised intermediary. `private` is weaker again: it still permits storage in a browser cache.
 
-HTTP/2 HPACK and HTTP/3 QPACK header-compression tables are also distinct from HTTP response caches. HPACK provides a “never indexed” representation for sensitive fields and names `Cookie` and `Authorization` as examples, but use of that representation remains an implementation concern. It is useful defence in depth, not an application security boundary.
+HTTP/2 HPACK and HTTP/3 QPACK compression tables are separate from response caches. HPACK has a “never indexed” representation for sensitive fields and names `Cookie` and `Authorization` as examples, but the implementation has to use it. Treat this as defence in depth, not a security boundary.
 
-## The logging reality
+## What actually gets logged
 
-Traditional access-log formats commonly record the request line—which contains the URL—along with the referrer and user agent. For example, the predefined [nginx combined log format](https://nginx.org/en/docs/http/ngx_http_log_module.html) does not include arbitrary request headers or the request body. This gives `Authorization`, cookies, custom headers, and bodies a lower *default access-log* exposure than URLs.
+Traditional access logs usually record the request line—which contains the URL—plus the referrer and user agent. The standard [nginx combined log format](https://nginx.org/en/docs/http/ngx_http_log_module.html), for example, does not include arbitrary request headers or the body. That gives `Authorization`, cookies, custom headers and bodies lower *default access-log* exposure than URLs.
 
-That advantage frequently disappears elsewhere in the stack. In real systems, exception middleware, debug logging, API gateways, request inspectors, and error-reporting tools often serialize a complete request when an operation fails. Some deployments do the same for ordinary structured logs. A particularly common partial safeguard is to redact `Authorization` while retaining cookies, unfamiliar custom headers, parsed form fields, and the complete request body.
+The advantage often disappears elsewhere. Exception middleware, debug logging, API gateways, request inspectors and error-reporting tools have a habit of serialising the complete request when something fails. Some systems do it for ordinary structured logs too. A common half-fix is to redact `Authorization` while keeping cookies, unfamiliar headers, parsed form fields and the whole body.
 
-This practice conflicts with the [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html), which recommends removing, masking, hashing, sanitizing, or encrypting access tokens, session identifiers, encryption keys, and sensitive personal data rather than recording them directly. The gap between recommended practice and operational practice means that request bodies and unrecognized headers should be assumed loggable.
+The [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) says to remove, mask, hash, sanitise or encrypt access tokens, session identifiers, keys and sensitive personal data instead of recording them directly. Good advice, but not a safe assumption about a system you have not inspected. Treat bodies and unrecognised headers as loggable.
 
-Observability instrumentation creates a similar risk. The [OpenTelemetry HTTP semantic conventions](https://opentelemetry.io/docs/specs/semconv/registry/attributes/http/) recommend explicit configuration of which request headers may be captured because capturing all headers can disclose sensitive information.
+Observability has the same problem. The [OpenTelemetry HTTP semantic conventions](https://opentelemetry.io/docs/specs/semconv/registry/attributes/http/) recommend explicitly choosing which headers to capture because “capture everything” can disclose sensitive data.
 
-Logs remain security-sensitive assets even when raw secrets have been excluded. Access to them should be restricted and audited, their integrity should be protected, and retention and deletion periods should be explicit. Collection must also have an appropriate legal and organizational basis: operational usefulness is not by itself sufficient reason to retain personal data. These controls limit the harm caused by safe derived identifiers and contextual data being combined, queried, or disclosed.
+Even well-redacted logs are security-sensitive. Restrict and audit access, protect their integrity, and set real retention and deletion periods. “It might be useful later” is not enough reason to keep personal data indefinitely; harmless-looking identifiers can become identifying when they are combined.
 
 ## Authorization
 
-`Authorization` is generally the least accident-prone HTTP header for a bearer credential because the ecosystem knows what it means:
+`Authorization` is usually the least accident-prone header for a bearer credential because the surrounding ecosystem knows what it means:
 
 - HTTP caching gives authenticated requests special shared-cache treatment.
 - HTTP header-compression implementations can treat it as never-indexed.
-- proxies, frameworks, and observability products frequently include it in default redaction lists.
+- Proxies, frameworks, and observability products frequently include it in default redaction lists.
 - [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750.html) recommends the `Authorization` header for OAuth bearer tokens and warns against putting bearer tokens in page URLs.
 
-These are conventions, not confidentiality guarantees. The header is visible at every TLS endpoint and every application layer through which the decoded request passes. A full request dump, incorrectly configured trace exporter, or custom proxy can still record it.
+Those conventions help, but they are not confidentiality guarantees. Every TLS endpoint and application layer that sees the decoded request can still read the header. So can a full request dump, a badly configured trace exporter or a custom proxy.
 
 Bearer credentials should be short-lived, audience-restricted, narrowly scoped, and replaceable. A cryptographic private key should not be transmitted in `Authorization` or anywhere else in an HTTP request.
 
 ## Cookies
 
-An opaque session identifier in a cookie with `Secure`, `HttpOnly`, and an appropriate `SameSite` setting is usually preferable to exposing an API token to application JavaScript. `HttpOnly` prevents ordinary page scripts from directly reading the cookie; it does not prevent those scripts from causing the browser to make authenticated requests.
+For a browser session, an opaque cookie with `Secure`, `HttpOnly` and an appropriate `SameSite` setting is usually better than giving JavaScript an API token. `HttpOnly` stops ordinary page scripts reading the cookie; it does not stop them making authenticated requests through the browser.
 
-Cookies are deliberately stored by browsers and sent automatically to matching destinations. They may therefore be present in browser profiles, backups, developer tools, endpoint inspection products, sufficiently privileged extensions, proxies, and server-side request dumps. Cookie values should be opaque references to server-side state rather than containers for raw PII. The `__Host-` prefix can further constrain a session cookie's scope.
+Cookies are stored by design and sent automatically to matching destinations. Expect to find them in browser profiles, backups, developer tools, endpoint inspection products, privileged extensions, proxies and server-side request dumps. Keep the value opaque; raw PII does not belong in it. The `__Host-` prefix can narrow a session cookie's scope further.
 
 For browser OAuth clients, [RFC 10017](https://www.rfc-editor.org/rfc/rfc10017.html) presents a backend-for-frontend (BFF) as the strongest of its principal architecture patterns: OAuth tokens remain at the backend and the browser holds only a cookie-backed session. Malicious page code can still act through the user's browser, but it cannot directly extract the backend tokens.
 
 ## Custom secret headers
 
-A custom header such as `X-API-Key` avoids browser history, referrer propagation, and conventional request-line logging. It is not necessarily safer than `Authorization`, because generic infrastructure may not recognize the header as sensitive.
+A custom header such as `X-API-Key` avoids browser history, referrer propagation and conventional request-line logging. It may still be worse than `Authorization`: generic infrastructure has no reason to recognise your header as sensitive.
 
 Every custom credential header should be registered with redaction policy at all of the following layers:
 
@@ -148,9 +144,9 @@ A custom secret header must not be included in `Vary`. Cross-origin use also cau
 
 ## Request bodies
 
-Request bodies avoid the browser-history, referrer, and conventional access-log problems of URLs. HTTP caches also primarily store responses, and `POST` responses are not ordinarily keyed by request body content.
+A request body avoids the browser-history, referrer and conventional access-log problems of a URL. HTTP caches mainly store responses, and a `POST` response is not normally keyed by the request body.
 
-Bodies nevertheless have high practical logging exposure. Frameworks commonly parse them into convenient objects, after which exception handlers and structured loggers can serialize them. Validation failures are especially dangerous: the invalid input is often attached to the error precisely to make debugging easier. Proxies and APM agents may capture the raw body before application-level redaction runs.
+In practice, bodies are logged surprisingly often. Frameworks parse them into convenient objects, then exception handlers and structured loggers serialise those objects. Validation failures are a particular trap: the bad input is attached to the error because it is useful for debugging. A proxy or APM agent may also capture the raw body before application redaction runs.
 
 Necessary PII belongs in a body rather than in a URL or arbitrary header, but it should still be minimized. Schemas should classify sensitive fields, and log serializers should operate on an allowlisted safe view rather than serializing the parsed request and deleting a few known keys afterward.
 
@@ -160,9 +156,9 @@ Application-layer encryption can keep selected body fields opaque to CDNs, TLS-t
 
 Under the URI, HTTP, and Referrer Policy specifications, the fragment is interpreted by the client. A conforming browser does not include it in the HTTP request target or in the `Referer` header.
 
-Operationally, fragment values do sometimes appear at servers. The cause is not always known. Plausible sources include nonconforming or embedded user agents, extensions, client-side code that copies `location.href` or `location.hash` into another request, analytics and error telemetry, native wrappers, and other intermediating software. A fragment should therefore be treated as *unlikely* to reach ordinary server infrastructure, not as cryptographically prevented from doing so.
+The specification is clear; real systems are messier. Fragment values sometimes reach servers through embedded or nonconforming user agents, extensions, native wrappers, analytics, error telemetry, or client code that copies `location.href` or `location.hash` into another request. Treat a fragment as *unlikely* to reach ordinary server infrastructure, not as cryptographically prevented from doing so.
 
-The fragment is directly visible to every same-page script through `window.location`. It can also appear in browser history, synced history, copied URLs, screenshots, crash reports, session-replay tools, and extension APIs. OAuth's former Implicit flow returned access tokens in fragments; [RFC 10017 now prohibits that flow](https://www.rfc-editor.org/rfc/rfc10017.html#section-7.2), in part because any third-party or malicious script on the page can read the token.
+Every script on the page can read the fragment through `window.location`. It can also appear in browser history, synced history, copied URLs, screenshots, crash reports, session replay and extension APIs. OAuth's former Implicit flow returned access tokens in fragments; [RFC 10017 now prohibits that flow](https://www.rfc-editor.org/rfc/rfc10017.html#section-7.2), in part because third-party or malicious page code can read the token.
 
 When a fragment is used for a narrowly scoped bootstrap value, it should be removed before third-party code loads:
 
@@ -173,11 +169,11 @@ When a fragment is used for a narrowly scoped bootstrap value, it should be remo
 </script>
 ```
 
-This script should be the first executable content on an isolated landing page. The page should avoid third-party scripts, use a strict Content Security Policy, avoid redirects before cleanup, and keep the value only as long as needed. Cleanup reduces exposure but cannot undo capture that occurred before `replaceState` executed.
+This should be the first executable code on a small, isolated landing page. Do not load third-party scripts or redirect first. Use a strict Content Security Policy and discard the value as soon as possible. `replaceState` reduces later exposure; it cannot undo an earlier capture.
 
 ### Performance Timeline retains request URLs
 
-Removing a fragment from `window.location` and browser history does not necessarily remove it from the browser's Performance Timeline. [Navigation Timing](https://w3c.github.io/navigation-timing/#marking-navigation-timing) initializes the navigation entry from the document's URL, and [Resource Timing](https://w3c.github.io/resource-timing/#sec-performanceresourcetiming) stores requested resource URLs in performance entries. The [HTML history update steps](https://html.spec.whatwg.org/dev/browsing-the-web.html#url-and-history-update-steps) used by `history.replaceState` change the document and session-history URL but do not rewrite an already-created performance entry.
+Removing a fragment from `window.location` and history does not necessarily remove it from the Performance Timeline. [Navigation Timing](https://w3c.github.io/navigation-timing/#marking-navigation-timing) creates an entry from the document URL, while [Resource Timing](https://w3c.github.io/resource-timing/#sec-performanceresourcetiming) stores requested resource URLs. The [history update steps](https://html.spec.whatwg.org/dev/browsing-the-web.html#url-and-history-update-steps) used by `history.replaceState` do not rewrite entries that already exist.
 
 Same-origin code that runs later may therefore be able to recover an initial navigation URL or the URLs of earlier Fetch, XHR, image, script, and other resource requests:
 
@@ -188,17 +184,17 @@ const resourceURLs = performance
   .map(entry => entry.name);
 ```
 
-The Performance APIs expose URLs and timing metadata rather than request headers or bodies. They do not directly reveal an `Authorization` value, cookie, or body field unless application code also placed that value in a URL. Browser handling of fragments varies, particularly for special fragment directives, so an application should conservatively assume that an ordinary fragment can remain available through a navigation or resource entry after visible cleanup.
+The Performance APIs expose URLs and timing, not headers or bodies. They will not reveal `Authorization`, a cookie or a body field unless somebody also put that value in a URL. Fragment handling varies between browsers, especially for special fragment directives, so assume an ordinary fragment may remain in a navigation or resource entry after visible cleanup.
 
-`performance.clearResourceTimings()` can remove buffered resource entries, but there is no corresponding standard operation for clearing the current navigation entry. Clearing also cannot retract a value already copied by a `PerformanceObserver`, analytics library, logging or tracing client, browser extension, or earlier script.
+`performance.clearResourceTimings()` removes buffered resource entries, but there is no equivalent for the current navigation entry. Nor can clearing retract a value already copied by a `PerformanceObserver`, analytics library, tracing client, extension or earlier script.
 
-If later page code must not be able to recover the bootstrap URL, the bootstrap should run in a minimal isolated document and then transition to a genuinely new document whose initial URL never contained the fragment. Merely removing or replacing the fragment in the same document is not sufficient. The new document should be loaded before third-party, analytics, logging, tracing, or other nonessential code is introduced.
+If later code must not recover the bootstrap URL, run the bootstrap in an isolated document and then load a genuinely new document whose initial URL never contained the fragment. Do that before introducing analytics, logging, tracing or other nonessential code. Replacing the fragment in the same document is not enough.
 
-Given these complications, a fragment is not a leak-proof place to store raw PII, reusable credentials, or secret tokens when logging, tracing, analytics, or malicious code can run with first-party authority. At most, it should carry a narrowly scoped, short-lived, single-use bootstrap value or decryption key whose disclosure has been explicitly considered in the threat model.
+This is why I would not describe a fragment as a leak-proof home for PII or reusable credentials. At most, use one for a narrow, short-lived, single-use bootstrap value or decryption key, and include its possible disclosure in the threat model.
 
 ### Fragment-held decryption keys
 
-A specialised split-knowledge design can place ciphertext in a server-visible location and its decryption key in the fragment. The server, CDN, and conventional request logs then see ciphertext while the page can decrypt it locally.
+In a split-knowledge design, the server-visible location holds ciphertext and the fragment holds its key. The server, CDN and conventional request logs see ciphertext; the page decrypts it locally.
 
 A framework implementing this pattern should provide:
 
@@ -211,11 +207,11 @@ A framework implementing this pattern should provide:
 - explicit binding of the ciphertext to its intended origin and purpose;
 - zero plaintext logging after decryption.
 
-This design protects plaintext from server-side caches and early logging. It does not protect against browser-history capture before cleanup, malicious same-origin JavaScript, extensions, compromised browser profiles, or code that can observe the decrypted value. If the ciphertext and key are both recoverable from the original full URL, anyone possessing that URL can decrypt the PII.
+This keeps plaintext out of server-side caches and early logs. It does nothing about history capture before cleanup, malicious same-origin JavaScript, extensions, a compromised browser profile or code that sees the decrypted value. If the original URL contains enough information to recover both ciphertext and key, anyone with that URL can decrypt the PII.
 
 ## URL paths and query strings
 
-Paths and query strings have the broadest accidental-disclosure surface. They commonly appear in:
+Paths and query strings have the widest accidental-disclosure surface. They turn up in:
 
 - browser history and history synchronization;
 - bookmarks, copied links, screenshots, and support tickets;
@@ -226,86 +222,85 @@ Paths and query strings have the broadest accidental-disclosure surface. They co
 - metrics labels and error messages;
 - allowlists, blocklists, and security-product event stores.
 
-The current default referrer policy, `strict-origin-when-cross-origin`, still sends the full path and query on same-origin requests. `Referrer-Policy: no-referrer` reduces propagation but does not remove any of the other sinks.
+The default referrer policy, `strict-origin-when-cross-origin`, still sends the full path and query on same-origin requests. `Referrer-Policy: no-referrer` limits that propagation, but none of the other copies disappear.
 
 URLs should contain opaque, short-lived, single-use handles rather than PII or bearer credentials. [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html#section-4.3) discusses even short-lived OAuth authorization codes as a browser-history exposure and relies on replay prevention and prompt cleanup.
 
 ## Tracing and baggage
 
-Distributed tracing is designed to propagate context across process boundaries. That makes tracing metadata one of the worst places for sensitive data.
+Tracing is designed to copy context across process boundaries. That makes its metadata a particularly bad place for sensitive data.
 
-OpenTelemetry baggage may be forwarded automatically to downstream services and then copied into spans, metrics, and logs. Its own [security guidance](https://opentelemetry.io/docs/concepts/signals/baggage/#baggage-security-considerations) warns that sensitive baggage can reach unintended resources, including third-party APIs. Credentials, raw user identifiers, email addresses, health information, and other PII should not be placed in `baggage`, `tracestate`, correlation headers, or metric labels.
+OpenTelemetry baggage may be forwarded automatically to downstream services and copied again into spans, metrics and logs. Its [security guidance](https://opentelemetry.io/docs/concepts/signals/baggage/#baggage-security-considerations) warns that baggage can reach unintended resources, including third-party APIs. Keep credentials, user identifiers, email addresses, health information and other PII out of `baggage`, `tracestate`, correlation headers and metric labels.
 
 ## Nonces, single-use tokens, and opaque handles
 
-Nonces and single-use handles reduce the value of a leak; they do not necessarily prevent the leak or protect the underlying data when it is finally collected or used.
+These terms are often used as though they were interchangeable. They are not.
 
-A nonce, a one-time token, and a sender-bound credential solve related but different problems:
+- A **nonce** proves freshness, but only when it is part of an authenticated request or proof. It is not secret and does not authenticate anything on its own. It may not even be literally single-use: DPoP, for example, can reuse a server nonce while rejecting duplicate proof identifiers.
+- A **single-use opaque handle** points to server-side state or permits one narrow operation without carrying the PII itself. That makes a logged copy less revealing. Until it is redeemed or expires, however, an unbound handle is still a bearer credential and an attacker may win the race to use it.
+- A **sender-bound token** also requires proof from the expected user, client or browser-held key. A stolen token is then less portable. Malicious code already running in the authorised browser may still invoke the key or make the browser send the request; [RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html#section-11.4) calls out this DPoP limitation.
+- **Encryption** hides a value from early intermediaries. It does not hide it from the browser that collected it or the service that decrypts it.
+- A **zero-knowledge proof** can reveal a fact without revealing the source value, but only when the application needs the fact and not the data itself.
 
-- A **nonce** establishes freshness when it is bound to an authenticated request or proof. It does not provide authentication or confidentiality by itself, and it need not always be literally single-use. For example, DPoP can permit a server nonce to be reused while rejecting duplicate proof identifiers.
-- A **single-use opaque handle** refers to server-side state or authorizes one narrowly defined operation without carrying the PII or secret in its own value. Before redemption, an unbound handle is still a bearer credential: someone who obtains it may be able to win a race to use it.
-- A **sender-bound token** requires proof from a particular user, client, browser-held key, or other presenter. This makes an exported token less useful, but malicious code running in the authorized browser may still invoke the key or ask the browser to make the request. [RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html#section-11.4) describes this limitation for DPoP.
-- **Encryption** can prevent early intermediaries from seeing a value, but the browser that collects it and the service that decrypts it still receive plaintext.
-- A **zero-knowledge proof** can prove a limited fact without revealing the underlying value, but only when the application needs the fact rather than the data itself.
+All of these techniques either make a leak less useful or reduce where plaintext appears. None makes leakage impossible.
 
 ### A practical redemption model
 
-A one-time handle should be high-entropy, opaque, short-lived, and bound to one declared purpose. A typical lifecycle is:
+A useful one-time handle is random, short-lived and deliberately boring. It has one job:
 
-1. Create the handle without embedding PII, credentials, account numbers, or business meaning.
-2. Bind it to the expected subject or session, action, audience, expiry, and, where appropriate, a browser-held public key.
-3. Bind any proof to the intended request method and destination. For high-value operations, also bind the submitted content so that a stolen proof cannot authorize a different payload. [HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421.html) and a content digest provide standard building blocks for such protocols.
-4. Redeem it atomically and permit one logical operation.
-5. Return or perform only the minimum operation authorized by the handle.
-6. Retain only a non-reversible audit fingerprint and the minimum state needed to make retries safe.
-7. Treat an attempted reuse as a possible leak or replay signal.
+1. Generate it without embedding PII, credentials, account numbers or business meaning.
+2. Bind it to the expected subject or session, action, audience and expiry. Add a browser-held public key where the extra friction is justified.
+3. Bind the proof to the request method and destination. For a high-value operation, bind the content too, so the same proof cannot authorise a different payload. [HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421.html) and a content digest are useful building blocks.
+4. Redeem it atomically for one logical operation and return only the result it authorises.
+5. Keep a non-reversible audit fingerprint and just enough state to make retries safe.
+6. Treat reuse as a possible leak or replay.
 
-“Single-use” should usually mean one logical operation rather than one HTTP delivery attempt. A browser, proxy, or application may retry after a timeout, and the original response may have been lost. An identical retry should be able to recover the original outcome without repeating the side effect; a changed payload or action should fail. This requires coordinated state across replicas and careful handling of concurrent redemption, partial failure, expiry, back-button navigation, and multiple tabs.
+Do not confuse “single-use” with “one HTTP delivery attempt”. Browsers, proxies and applications retry, and a successful response can be lost. An identical retry should recover the first result without repeating the side effect; a changed payload or action should fail. This gets awkward across replicas, concurrent tabs, partial failures and expiry, which is why it belongs in shared infrastructure rather than every handler.
 
-Do not store redeemable handles in plaintext if a hash is sufficient for lookup or verification. Do not put them in a URL merely because they are opaque: until expiry or successful redemption, they may still be credentials and can still be copied into history, logs, referrers, telemetry, and support tools.
+Store a hash instead of the redeemable handle when a hash is enough. And do not put the handle in a URL merely because it is opaque. Before redemption it may still be a credential, with all the usual history, logging, referrer and telemetry problems.
 
 ### Binding trade-offs
 
-- **User or authenticated session binding** is usually the least surprising default. It prevents a different account from redeeming a leaked handle, but it does not help when the session is also compromised.
-- **Browser or device key binding** provides stronger resistance to off-device replay. DPoP can use a non-extractable browser key for this purpose, but injected code can still invoke that key while it controls the browser. Device reset, lost browser storage, cross-device continuation, accessibility tools, and account recovery also need explicit handling.
-- **IP address binding** may reduce reuse from a visibly different network, but it is brittle as a hard control. Mobile networks, VPNs, IPv6 address changes, corporate proxies, and carrier-grade NAT can change an honest user's address or give many users the same address. An attacker may also share the victim's apparent address. [OWASP's session guidance](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html#binding-the-session-id-to-other-user-properties) treats IP address and User-Agent properties as useful detection signals rather than complete defences. If an IP signal is used, it must come from a trusted network boundary rather than an untrusted forwarding header.
-- **Purpose, action, audience, method, and destination binding** is strong and comparatively low-friction. A handle issued to submit one form should not be usable to retrieve the record, call another service, or authorize a different operation.
-- **Delegation** should be explicit. Rather than forwarding the original user- or browser-bound token, exchange it for a shorter-lived, more narrowly scoped token bound to the delegate. [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693.html) defines OAuth token-exchange patterns for delegation and impersonation. Hard binding without an exchange mechanism makes legitimate delegation difficult or impossible.
+- **User or session:** usually the least surprising default. It stops a different account redeeming the handle, but not an attacker who also has the session.
+- **Browser or device key:** better against off-device replay. DPoP can use a non-extractable browser key, although injected code can still ask that key to sign. Plan for device reset, lost storage, cross-device journeys, accessibility tools and account recovery.
+- **IP address:** useful as a signal, brittle as a lock. Mobile networks, VPNs, IPv6 address changes, corporate proxies and carrier-grade NAT can move an honest user or put many users behind one address. An attacker may even share the victim's apparent address. [OWASP's session guidance](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html#binding-the-session-id-to-other-user-properties) makes the same distinction. Take any IP signal from a trusted network boundary, not an arbitrary forwarding header.
+- **Purpose, action, audience, method and destination:** strong and relatively cheap. A handle for submitting a form should not retrieve the resulting record or call another service.
+- **Delegate:** issue a new, narrower token bound to the delegate instead of forwarding the original. [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693.html) defines token-exchange patterns for delegation and impersonation. Without an exchange path, hard binding can make legitimate delegation impossible.
 
 ### When the browser gathers the PII
 
-A handle cannot replace PII that the server has never received. When the person enters the data in a browser, the initial collection still needs a deliberately narrow ingestion path:
+Tokenisation cannot replace data the server has never received. If somebody enters PII in a browser, there is still an initial plaintext collection step. Keep that path as narrow as possible:
 
-1. The server issues a one-time submission handle bound to the intended form, user or session, schema, and action.
-2. The browser gathers the minimum PII required for that action.
-3. The browser sends it in the request body to a dedicated ingestion service, using the handle to authorize and correlate the submission.
-4. Where justified, the browser encrypts selected fields directly for that service so that CDNs, TLS terminators, gateways, and early logging see ciphertext rather than plaintext.
-5. The ingestion service validates and stores the PII, consumes the submission handle, and returns a new opaque record handle.
-6. Later systems pass the record handle instead of repeatedly copying the PII.
+1. Issue a one-time submission handle for the form, user or session, schema and action.
+2. Collect only the PII needed for that action.
+3. Send it in the body to a dedicated ingestion service, using the handle for authorisation and correlation.
+4. Where the risk warrants it, encrypt selected fields for that service in the browser. The CDN, TLS terminator, gateway and early logs then see ciphertext.
+5. Validate and store the data, consume the submission handle, and return a different opaque record handle.
+6. Pass that record handle through later systems instead of copying the PII again.
 
-The submission handle controls who may submit, what operation is permitted, and whether it can be replayed. It does not hide data already present in form controls or JavaScript memory. First-party code, third-party code running with first-party authority, browser extensions, and a compromised page may observe the PII before encryption. WebCrypto does not change that boundary: its [security considerations](https://www.w3.org/TR/WebCryptoAPI/#security-considerations-for-authors) warn that injected script can expose keys or data and that the application has access to the messages it processes.
+The submission handle limits who can submit, what they can do and whether the action can be replayed. It does not hide data already sitting in form controls or JavaScript memory. First-party code, third-party code running with first-party authority, extensions and a compromised page can all see the PII before encryption. WebCrypto does not change this; its [security considerations](https://www.w3.org/TR/WebCryptoAPI/#security-considerations-for-authors) warn that injected script can expose keys or data and that an application can read the messages it processes.
 
-Particularly sensitive collection should therefore use a minimal, isolated page without third-party analytics, session replay, advertising, tag managers, or other nonessential code. A strict content security policy and application-layer field encryption provide defence in depth, but neither makes plaintext safe from malicious code already executing with the collection page's authority.
+For especially sensitive collection, use a small isolated page without analytics, session replay, advertising, tag managers or other nonessential code. A strict Content Security Policy and field encryption help, but neither protects plaintext from malicious code that already has the page's authority.
 
 ### The eventual point of exposure
 
-Sooner or later, collected PII must usually be evaluated, displayed, delivered, or used; otherwise there was little reason to collect it. Tokenization does not remove this *revelation boundary*. It reduces how many systems cross it.
+Sooner or later the PII has to be evaluated, displayed, delivered or otherwise used. If not, there was little reason to collect it. Tokenisation does not remove this *revelation boundary*; it reduces how many systems cross it.
 
-The handle resolver should return only the fields or derived result needed for the current purpose. Many callers need an answer such as “age requirement satisfied,” “account verified,” or “delivery permitted,” not the complete underlying record. This is useful data minimization even when a zero-knowledge proof is unnecessary or impractical. Zero-knowledge techniques help only when the verifier can complete its task from a proof of a fact and does not need the source data for delivery, treatment, investigation, support, or another legitimate purpose.
+The resolver should return only what the caller needs. Often that is “age requirement satisfied”, “account verified” or “delivery permitted”, not the whole record. This is ordinary data minimisation; it does not require a zero-knowledge proof. Zero-knowledge techniques help when a verifier can act on a fact alone. They do not help when the source data is genuinely needed for delivery, treatment, investigation or support.
 
-Cryptographic private keys are a special case: they often need to be used but do not need to be revealed. An HSM, KMS, or narrowly scoped signing or decryption service can perform the operation while keeping the key bytes inside the protected boundary.
+Private keys are a useful exception to “the data must eventually be revealed”. A key may need to sign or decrypt without ever leaving an HSM, KMS or tightly scoped service.
 
-The resulting architecture has fewer plaintext leak points, but the remaining points become more important. The ingestion service, handle resolver, PII store, authorized consumers, and key-use service are concentrated trust boundaries. They require strict access control, purpose limitation, safe request representations, schema-derived redaction, short retention, and leak-canary testing. An opaque handle can also remain personal data when it is linkable to a person, even if its value contains no recognizable PII.
+This leaves fewer plaintext leak points, but each one matters more. The ingestion service, resolver, PII store, authorised consumers and key-use service become the crown jewels. Give them strict access control, purpose limits, safe request representations, schema-derived redaction, short retention and leak-canary tests. Remember that an opaque handle may itself be personal data if it can be linked back to a person.
 
-The practical advantages are smaller and less informative leaked values, expiry and replay detection, centralized authorization, easier revocation, and fewer systems receiving plaintext. The costs are server-side state, an additional resolution dependency, atomic redemption and retry complexity, recovery and cross-device friction, harder delegation, and a high-value resolver or vault. These mechanisms contain authority and concentrate plaintext; they do not make either disappear.
+This buys us fewer meaningful copies and easier expiry, replay detection and revocation. The cost is server-side state, a resolution dependency, awkward retries, recovery friction, harder delegation and a high-value vault. Authority and plaintext have been contained, not abolished.
 
-## Framework facilities that can provide stronger protection
+## What the framework should do
 
-Choosing a carrier is a local decision. Preventing leaks is an end-to-end property. A framework can provide protections that are difficult for each application team to implement consistently.
+Picking a better request carrier helps, but most leaks happen across the whole path. These protections are difficult to implement correctly in every handler, so they should live in shared infrastructure.
 
 ### 1. Sensitivity-aware values and taint propagation
 
-The framework can represent sensitive data as a distinct runtime and type-system value rather than as an ordinary string:
+Represent sensitive data as a distinct runtime and type-system value, not an ordinary string:
 
 ```ts
 const email = Sensitive.pii(input.email);
@@ -317,7 +312,7 @@ request.setBaggage("token", token);        // error
 request.json({ email });                   // allowed by an explicit route policy
 ```
 
-The difficult part is preserving the label through parsing, validation, string interpolation, exceptions, queues, database objects, RPC boundaries, and asynchronous callbacks. A framework can own those transitions and require explicit declassification before a value enters an unsafe sink.
+The hard part is keeping the label through parsing, validation, interpolation, exceptions, queues, database objects, RPC boundaries and asynchronous callbacks. Make those transitions part of the framework, and require explicit declassification before a value enters an unsafe sink.
 
 Sensitivity metadata should distinguish at least:
 
@@ -330,7 +325,7 @@ Sensitivity metadata should distinguish at least:
 
 ### 2. Schema-derived redaction
 
-Request and response schemas can classify fields once and generate:
+Classify fields once in request and response schemas, then generate:
 
 - parser and validator behaviour;
 - safe structured-log views;
@@ -339,11 +334,11 @@ Request and response schemas can classify fields once and generate:
 - data-retention rules;
 - application-layer encryption policies.
 
-This is safer than maintaining separate, name-based redaction lists in every logger. Name-based lists routinely miss aliases such as `secret`, `apiKey`, `credential`, `assertion`, nested values, arrays, or values embedded in free-form strings.
+This is safer than maintaining a separate list of field names in every logger. Those lists miss aliases such as `secret`, `apiKey`, `credential` and `assertion`, as well as nested values, arrays and secrets buried in free-form strings.
 
 ### 3. A safe request representation for logs and errors
 
-Instead of giving loggers access to the raw request object, a framework can expose only a deliberately lossy representation:
+Do not give loggers the raw request object. Give them a deliberately lossy representation:
 
 ```json
 {
@@ -356,46 +351,46 @@ Instead of giving loggers access to the raw request object, a framework can expo
 }
 ```
 
-Raw headers and bodies can be unavailable by default, including in exception objects. Where correlation is necessary, the framework can log a keyed HMAC fingerprint rather than the original credential or identifier. Temporary raw capture should require a narrowly scoped break-glass policy, short retention, access auditing, and automatic deletion.
+Raw headers and bodies should be unavailable by default, including from exception objects. For correlation, log a keyed HMAC fingerprint rather than the original credential or identifier. Temporary raw capture needs a narrow break-glass policy, short retention, audited access and automatic deletion.
 
-Any user-controlled value that is retained must also be structurally encoded before it enters a log. Redaction protects confidentiality; encoding separately prevents line breaks, delimiters, or other crafted input from forging log entries or attacking downstream log processors.
+Structurally encode any user-controlled value that does reach a log. Redaction protects confidentiality; encoding stops crafted line breaks or delimiters from forging entries or attacking downstream processors.
 
 ### 4. Automatic cache and referrer policy
 
-Routes classified as sensitive can automatically receive:
+Sensitive routes should automatically receive:
 
 ```http
 Cache-Control: no-store
 Referrer-Policy: no-referrer
 ```
 
-The framework can reject contradictory `public` or `s-maxage` directives, reject sensitive headers named in `Vary`, disable body capture, and prevent sensitive values from becoming cache tags or surrogate keys. It can also redirect a completed one-time exchange to a clean URL so that the working page never retains the bootstrap URL.
+Reject contradictory `public` or `s-maxage` directives and sensitive headers named in `Vary`. Disable body capture, keep sensitive values out of cache tags and surrogate keys, and redirect a completed one-time exchange to a clean URL.
 
 ### 5. One-time opaque handles
 
-The safest URL value is often a random handle with no meaning outside a short redemption window. A framework can make the [nonce and single-use-token lifecycle](#nonces-single-use-tokens-and-opaque-handles) a primitive: generate and bind the handle, enforce one logical operation with retry-safe redemption, exchange it for server-side state or an `HttpOnly` session cookie, redirect to a clean URL, and retain only a non-reversible audit fingerprint. Centralizing this lifecycle keeps concurrency, partial failure, recovery, and replay policy out of individual handlers.
+The safest URL value is often a random handle with no meaning outside a short redemption window. Make the [nonce and single-use-token lifecycle](#nonces-single-use-tokens-and-opaque-handles) a primitive: bind the handle, redeem one logical operation safely across retries, exchange it for server-side state or an `HttpOnly` cookie, redirect to a clean URL, and retain only a non-reversible audit fingerprint. Keep concurrency, recovery and replay policy out of individual handlers.
 
 ### 6. Application-layer encrypted fields
 
-For particularly sensitive bodies, a framework can encrypt selected fields before the request reaches a CDN or TLS-terminating gateway. A standard construction such as [HPKE](https://www.rfc-editor.org/rfc/rfc9180.html), embedded in an application protocol with replay protection and authenticated context, can ensure that early infrastructure sees only ciphertext.
+For especially sensitive bodies, encrypt selected fields before the request reaches the CDN or TLS-terminating gateway. A standard construction such as [HPKE](https://www.rfc-editor.org/rfc/rfc9180.html), used inside a protocol with replay protection and authenticated context, can leave early infrastructure with ciphertext only.
 
-The decrypting service must recreate sensitivity-aware values rather than ordinary strings; otherwise the first post-decryption exception can put the plaintext back into logs. Key rotation, algorithm negotiation, payload binding, replay detection, and failure handling should be framework responsibilities rather than application code.
+After decryption, recreate sensitivity-aware values rather than ordinary strings, or the first exception may put the plaintext straight back into a log. Keep key rotation, algorithm negotiation, payload binding, replay detection and failure handling in shared code.
 
 ### 7. Credential brokers
 
-A server-side BFF can hold API credentials and expose only an opaque browser session. It can add `Authorization` only on outbound requests to allowlisted resource origins, enforce method and path restrictions, rate-limit operations, and remove credentials before redirects or error serialization.
+A server-side BFF can hold API credentials while the browser sees only an opaque session. It should add `Authorization` only for allowlisted resource origins, restrict methods and paths, rate-limit operations, and strip credentials before redirects or error serialisation.
 
-A worker-based broker can keep a token outside the main page's JavaScript heap and attach it to outbound requests. This reduces direct token extraction, but it is not equivalent to a BFF. RFC 10017 explains that service-worker OAuth patterns remain vulnerable to new token acquisition and browser-mediated request proxying, and therefore does not recommend the service-worker pattern as a general solution.
+A worker can keep a token out of the main page's JavaScript heap and attach it to requests. That makes direct extraction harder, but it is not a BFF. RFC 10017 notes that service-worker OAuth remains vulnerable to new token acquisition and browser-mediated request proxying, and does not recommend it as the general solution.
 
 ### 8. Sender-constrained and per-request credentials
 
-Frameworks can reduce the value of a copied bearer token by using sender-constrained tokens such as [DPoP](https://www.rfc-editor.org/rfc/rfc9449.html), non-exportable WebCrypto keys, short lifetimes, narrow audiences, and per-request proofs bound to a method and URL.
+Reduce the value of a copied bearer token with [DPoP](https://www.rfc-editor.org/rfc/rfc9449.html) or another sender constraint, non-exportable WebCrypto keys, short lifetimes, narrow audiences and per-request proofs bound to a method and URL.
 
-These mechanisms reduce off-device replay. They do not defeat malicious same-origin JavaScript that can ask the legitimate browser to make requests or obtain new credentials. A non-exportable key prevents extraction of key bytes; it does not prevent authorized code—or malicious code with the same privileges—from invoking the key.
+This cuts down off-device replay. It does not stop malicious same-origin JavaScript asking the legitimate browser to make requests or obtain fresh credentials. “Non-exportable” means the key bytes cannot be extracted; code with the right privileges can still invoke the key.
 
 ### 9. Egress and redirect controls
 
-A framework can maintain an origin-level egress policy and automatically:
+Enforce an origin-level egress policy below application code. It should:
 
 - strip credentials and sensitive context on cross-origin redirects;
 - prevent forwarding `Cookie`, `Authorization`, and custom credentials to unapproved origins;
@@ -404,11 +399,11 @@ A framework can maintain an origin-level egress policy and automatically:
 - distinguish public telemetry endpoints from trusted application APIs;
 - reject attempts to copy a complete current URL into a header, body, or telemetry event.
 
-These controls are most effective below application code, where a forgotten Fetch wrapper or new HTTP client cannot bypass them accidentally.
+Putting this below application code means a forgotten Fetch wrapper or a new HTTP client cannot bypass it by accident.
 
 ### 10. Leak-canary testing
 
-A testing framework can inject unique, non-functional canary values into every sensitive carrier, then exercise:
+Inject a unique, non-functional canary into every sensitive carrier, then exercise:
 
 - successful and failing requests;
 - validation and parsing errors;
@@ -418,19 +413,19 @@ A testing framework can inject unique, non-functional canary values into every s
 - service workers and offline caches;
 - CDN, proxy, application, trace, metric, and error-reporting stores.
 
-The test fails if a canary appears outside its declared destinations. Because each carrier receives a different canary, the result identifies the leaking path. This turns redaction from a configuration claim into an observable security property.
+Fail the test if a canary appears anywhere it was not declared. Give each carrier a different value so the result identifies the leaking path. Now redaction is an observed property, not a configuration claim.
 
-These leak canaries serve a different purpose from the [honeytokens recommended by OWASP A09](https://owasp.org/Top10/2025/A09_2025-Security_Logging_and_Alerting_Failures/#how-to-prevent). A honeytoken is a trap whose unexpected use or access signals possible attacker activity. A leak canary is test data whose appearance in an undeclared cache, log, trace, error report, or other sink demonstrates accidental propagation. A system may use both, but their alert conditions and handling should remain distinct.
+Leak canaries are not the [honeytokens recommended by OWASP A09](https://owasp.org/Top10/2025/A09_2025-Security_Logging_and_Alerting_Failures/#how-to-prevent). A honeytoken is a trap: unexpected use suggests an attacker. A leak canary is test data: finding it in an undeclared cache, log, trace or error report proves accidental propagation. Both are useful, but they should trigger different responses.
 
 ### 11. Retention and deletion orchestration
 
-Once sensitive data reaches logs or telemetry, removing it is often harder than preventing collection. A framework can attach retention classes to safe derived events, prevent high-sensitivity data from entering long-retention stores, track which processors received a value, and automate cache and telemetry deletion after an incident.
+Once sensitive data reaches logs or telemetry, removing it is harder than preventing collection. Attach retention classes to safe derived events, keep high-sensitivity data out of long-retention stores, record which processors received it, and automate cache and telemetry deletion after an incident.
 
-This cannot guarantee deletion from unknown intermediaries, immutable backups, or a recipient outside the framework. It can substantially reduce the number of systems that must be trusted.
+You cannot guarantee deletion from an unknown intermediary, immutable backup or outside recipient. You can at least reduce how many systems have to be trusted.
 
-## Preferred hierarchy
+## Order of preference
 
-For a new browser application, the general order of preference is:
+For a new browser application, I would work down this list:
 
 1. Do not transmit the sensitive value at all.
 2. Replace it with an opaque, short-lived, single-use server-side handle.
@@ -441,11 +436,11 @@ For a new browser application, the general order of preference is:
 7. Never put credentials or raw PII in paths, query strings, referrers, tracing baggage, metric labels, or cache keys.
 8. Never transmit a private cryptographic key merely to authenticate a request; use a proof of possession instead.
 
-## Limits of these techniques
+## Where this stops helping
 
-None of these techniques fully protects data that must be revealed to a compromised page. Same-origin malicious JavaScript can commonly read the value, intercept it before protection is applied, modify framework functions, or use the browser as an authenticated proxy.
+None of this protects data that has to be revealed to a compromised page. Malicious same-origin JavaScript can read it, intercept it before protection is applied, replace framework functions or use the browser as an authenticated proxy.
 
-The strongest architectures reduce how often the browser receives reusable secrets, reduce the authority and lifetime of every credential, prevent raw requests from reaching observability systems, and make unsafe data movement explicit rather than convenient.
+The realistic goal is smaller: give the browser fewer reusable secrets, give every credential less authority and a shorter life, keep raw requests out of observability systems, and make unsafe data movement difficult to do by accident.
 
 ## References
 
